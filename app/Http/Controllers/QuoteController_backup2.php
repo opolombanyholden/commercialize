@@ -8,8 +8,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
-use App\Models\ProtectedPdf;
-use App\Models\PricingPlan;
+use App\Models\ProtectedPdf; // AJOUTEZ CETTE LIGNE
 
 class QuoteController extends Controller
 {
@@ -39,7 +38,7 @@ class QuoteController extends Controller
     }
 
     /**
-     * Generate PDF with password and redirect to payment
+     * Generate and download the quote PDF.
      */
     public function generate(Request $request)
     {
@@ -105,15 +104,6 @@ class QuoteController extends Controller
             return back()->withErrors($validator)->withInput();
         }
 
-        // Vérifier l'unicité du numéro de devis
-        $existingQuote = ProtectedPdf::where('quote_number', $request->quote_number)
-            ->where('user_id', $user->id)
-            ->first();
-            
-        if ($existingQuote) {
-            return back()->withErrors(['quote_number' => 'Ce numéro de devis existe déjà.'])->withInput();
-        }
-
         // Vérifier que toutes les taxes appartiennent à l'utilisateur
         if (!empty($request->applied_taxes)) {
             $taxIds = collect($request->applied_taxes)->pluck('tax_id')->unique();
@@ -139,22 +129,13 @@ class QuoteController extends Controller
         }
 
         try {
-            // ÉTAPE 1 : GÉNÉRER LE MOT DE PASSE SÉCURISÉ
+            // Générer un mot de passe aléatoire pour le PDF
             $pdfPassword = $this->generateSecurePassword();
             
-            // ÉTAPE 2 : PRÉPARER LES DONNÉES POUR LE PDF
+            // Préparer les données pour le PDF
             $quoteData = $this->prepareQuoteData($request->all(), $user);
             
-            // Ajouter informations de sécurité
-            $quoteData['security'] = [
-                'generated_by' => $user->name,
-                'ip_address' => request()->ip(),
-                'generated_at' => now(),
-                'hash' => hash('sha256', $quoteData['quote']['number'] . $user->id . now()->timestamp),
-                'password' => $pdfPassword, // Inclure le mot de passe dans les données PDF
-            ];
-            
-            // ÉTAPE 3 : GÉNÉRER LE PDF AVEC MOT DE PASSE VISIBLE
+            // Générer le PDF (sans protection native)
             $pdf = PDF::loadView('quotes.pdf', $quoteData);
             $pdf->setPaper('A4', 'portrait');
             
@@ -164,21 +145,17 @@ class QuoteController extends Controller
             // Nom du fichier sécurisé
             $filename = 'Devis_' . $quoteData['quote']['number'] . '_' . now()->format('Ymd_His') . '.pdf';
             
-            // ÉTAPE 4 : SAUVEGARDER LE PDF PROTÉGÉ EN BASE
+            // Stocker le PDF protégé en base de données
             $protectedPdf = ProtectedPdf::create([
                 'user_id' => $user->id,
                 'quote_number' => $quoteData['quote']['number'],
                 'filename' => $filename,
-                'password' => $pdfPassword, // Le mot de passe pour déverrouiller
+                'password' => $pdfPassword,
                 'pdf_content' => base64_encode($pdfContent),
                 'quote_data' => $quoteData,
                 'client_email' => $quoteData['client']['email'],
                 'client_phone' => $quoteData['client']['phone'],
                 'total_amount' => $quoteData['totals']['total'],
-                'security_hash' => $quoteData['security']['hash'],
-                'is_paid' => false, // En attente de paiement
-                'paid_at' => null,
-                'payment_reference' => null,
             ]);
             
             // Log de succès
@@ -186,25 +163,13 @@ class QuoteController extends Controller
                 'protected_pdf_id' => $protectedPdf->id,
                 'quote_number' => $quoteData['quote']['number'],
                 'user_id' => $user->id,
-                'total_amount' => $quoteData['totals']['total'],
-                'pdf_password' => $pdfPassword, // Pour debug (optionnel)
+                'total_amount' => $quoteData['totals']['total']
             ]);
             
-            // ÉTAPE 5 : GÉNÉRER LE PDF D'INSTRUCTIONS (AVEC LIEN DE PAIEMENT)
-            $instructionsPdf = $this->generateInstructionsPdf($quoteData, $protectedPdf->id);
+            // Générer un PDF temporaire avec instructions de paiement
+            $instructionsPdf = $this->generateInstructionsPdf($quoteData, $pdfPassword, $protectedPdf->id);
             
-            // ÉTAPE 6 : TÉLÉCHARGER LES INSTRUCTIONS ET REDIRIGER VERS PAIEMENT
-            // Stocker le PDF d'instructions en session pour le télécharger après redirection
-            session(['instructions_pdf' => [
-                'content' => $instructionsPdf->output(),
-                'filename' => 'Instructions_Devis_' . $quoteData['quote']['number'] . '.pdf'
-            ]]);
-            
-            // Rediriger vers la page de paiement avec le PDF généré
-            return redirect()->route('quotes.payments')
-                ->with('success', 'Devis généré avec succès ! Téléchargez le PDF d\'instructions ci-dessous, puis procédez au paiement.')
-                ->with('generated_quote_id', $protectedPdf->id)
-                ->with('download_instructions', true);
+            return $instructionsPdf->download('Instructions_' . $quoteData['quote']['number'] . '.pdf');
             
         } catch (\Exception $e) {
             Log::error('Erreur génération PDF', [
@@ -337,270 +302,6 @@ class QuoteController extends Controller
             'generated_at' => now(),
         ];
     }
-
-    /**
-     * Génère un PDF d'instructions de paiement (AVEC lien de paiement)
-     */
-    private function generateInstructionsPdf($quoteData, $protectedPdfId)
-    {
-        $instructionsData = [
-            'quote' => $quoteData['quote'],
-            'client' => $quoteData['client'],
-            'company' => $quoteData['company'],
-            'totals' => $quoteData['totals'],
-            'pdf_id' => $protectedPdfId,
-            'access_url' => route('quotes.password-form', $protectedPdfId),
-            'payment_url' => route('quotes.payments'), // NOUVEAU : Lien vers paiement
-            'generated_at' => now(),
-            'instructions' => [
-                'step1' => 'Accédez au lien de paiement pour procéder au règlement',
-                'step2' => 'Après paiement confirmé, vous recevrez le mot de passe par email/SMS',
-                'step3' => 'Utilisez le lien d\'accès et le mot de passe pour télécharger le PDF final',
-            ],
-            'important_links' => [
-                'payment' => route('quotes.payments'),
-                'access' => route('quotes.password-form', $protectedPdfId),
-            ]
-        ];
-
-        return PDF::loadView('quotes.instructions-pdf', $instructionsData);
-    }
-
-    /**
-     * Affiche la vue de gestion des paiements avec le nouveau workflow
-     */
-    public function payments()
-    {
-        $user = Auth::user();
-        
-        // Récupérer les PDFs en attente de paiement
-        $pendingPdfs = ProtectedPdf::where('user_id', $user->id)
-            ->where('is_paid', false)
-            ->orderBy('created_at', 'desc')
-            ->get();
-
-        // Récupérer le dernier devis généré si vient de generate()
-        $lastGeneratedQuote = null;
-        if (session('generated_quote_id')) {
-            $lastGeneratedQuote = ProtectedPdf::find(session('generated_quote_id'));
-        }
-
-        // Récupérer le plan tarifaire de l'utilisateur (avec fallback)
-        $pricingPlan = null;
-        $downloadPrice = 500; // Prix par défaut
-        
-        try {
-            $pricingPlan = $user->pricingPlan ?? PricingPlan::where('slug', 'light')->first();
-            if ($pricingPlan) {
-                $downloadPrice = $pricingPlan->pdf_download_price;
-            }
-        } catch (\Exception $e) {
-            // Si la table pricing_plans n'existe pas encore
-            $pricingPlan = (object) [
-                'name' => 'Light',
-                'pdf_download_price' => 500
-            ];
-        }
-            
-        return view('quotes.payment', compact(
-            'pendingPdfs', 
-            'lastGeneratedQuote', 
-            'pricingPlan', 
-            'downloadPrice'
-        ));
-    }
-
-    /**
-     * NOUVELLE MÉTHODE : Télécharger le PDF d'instructions depuis la session
-     */
-    public function downloadInstructions()
-    {
-        if (!session('instructions_pdf')) {
-            return redirect()->route('quotes.payments')
-                ->with('error', 'Aucun PDF d\'instructions disponible.');
-        }
-        
-        $pdfData = session('instructions_pdf');
-        
-        // Supprimer de la session après téléchargement
-        session()->forget('instructions_pdf');
-        
-        return response($pdfData['content'])
-            ->header('Content-Type', 'application/pdf')
-            ->header('Content-Disposition', 'attachment; filename="' . $pdfData['filename'] . '"')
-            ->header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            ->header('Pragma', 'no-cache')
-            ->header('Expires', '0');
-    }
-    public function processPayment(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'quote_id' => 'required|exists:protected_pdfs,id',
-            'payment_method' => 'required|in:mobile_money,bank_transfer,cash',
-            'payment_reference' => 'required|string|min:6|max:100',
-            'notification_method' => 'required|in:email,sms',
-            'client_contact' => 'required|string|max:255', // Email ou téléphone
-        ], [
-            'quote_id.required' => 'Le devis est requis.',
-            'quote_id.exists' => 'Le devis sélectionné n\'existe pas.',
-            'payment_method.required' => 'La méthode de paiement est requise.',
-            'payment_reference.required' => 'La référence de paiement est requise.',
-            'payment_reference.min' => 'La référence doit contenir au moins 6 caractères.',
-            'notification_method.required' => 'La méthode de notification est requise.',
-            'client_contact.required' => 'Le contact client est requis.',
-        ]);
-
-        if ($validator->fails()) {
-            return back()->withErrors($validator)->withInput();
-        }
-
-        $protectedPdf = ProtectedPdf::where('id', $request->quote_id)
-            ->where('user_id', Auth::id())
-            ->where('is_paid', false)
-            ->first();
-
-        if (!$protectedPdf) {
-            return back()->withErrors(['quote_id' => 'Devis non trouvé ou déjà traité.']);
-        }
-
-        // Récupérer le plan tarifaire pour le montant
-        $user = Auth::user();
-        try {
-            $pricingPlan = $user->pricingPlan ?? PricingPlan::where('slug', 'light')->first();
-            $downloadPrice = $pricingPlan->pdf_download_price ?? 500;
-        } catch (\Exception $e) {
-            $downloadPrice = 500;
-        }
-
-        // Simuler la vérification du paiement
-        $paymentVerified = $this->verifyPayment($request->payment_reference, $downloadPrice);
-
-        if ($paymentVerified) {
-            // Marquer comme payé
-            $protectedPdf->update([
-                'is_paid' => true,
-                'paid_at' => now(),
-                'payment_reference' => $request->payment_reference,
-            ]);
-            
-            // Mettre à jour le contact client si fourni
-            if ($request->notification_method === 'email') {
-                $protectedPdf->update(['client_email' => $request->client_contact]);
-            } else {
-                $protectedPdf->update(['client_phone' => $request->client_contact]);
-            }
-            
-            Log::info('Paiement vérifié et devis débloqué', [
-                'protected_pdf_id' => $protectedPdf->id,
-                'quote_number' => $protectedPdf->quote_number,
-                'payment_reference' => $request->payment_reference,
-                'payment_method' => $request->payment_method,
-                'amount_paid' => $downloadPrice,
-                'user_id' => auth()->id()
-            ]);
-            
-            // Envoyer le mot de passe selon la méthode choisie
-            $this->sendPassword($protectedPdf, $request->notification_method);
-            
-            // Décompter du solde de l'utilisateur si applicable
-            if ($user->account_balance >= $downloadPrice) {
-                $user->decrement('account_balance', $downloadPrice);
-            }
-            
-            return redirect()->route('quotes.payments')
-                ->with('success', 'Paiement vérifié ! Le mot de passe a été envoyé au client.')
-                ->with('password_sent', session('password_sent'));
-        } else {
-            Log::warning('Échec vérification paiement', [
-                'quote_number' => $protectedPdf->quote_number,
-                'payment_reference' => $request->payment_reference,
-                'payment_method' => $request->payment_method,
-                'user_id' => auth()->id(),
-                'ip' => request()->ip()
-            ]);
-            
-            return back()->withErrors(['payment_reference' => 'Paiement non vérifié. Veuillez vérifier la référence.'])->withInput();
-        }
-    }
-
-    /**
-     * Affiche le formulaire de saisie du mot de passe (version sécurisée)
-     */
-    public function showPasswordForm($id)
-    {
-        // Validation de l'ID
-        if (!is_numeric($id) || $id <= 0) {
-            abort(404, 'Devis non trouvé');
-        }
-        
-        $protectedPdf = ProtectedPdf::findOrFail($id);
-        
-        // Log de tentative d'accès
-        Log::info('Accès formulaire mot de passe', [
-            'protected_pdf_id' => $id,
-            'user_id' => auth()->id(),
-            'client_email' => $protectedPdf->client_email,
-            'ip' => request()->ip()
-        ]);
-        
-        return view('quotes.password-form', compact('protectedPdf'));
-    }
-
-    /**
-     * Vérifie le mot de passe et télécharge le PDF (version sécurisée)
-     */
-    public function downloadWithPassword(Request $request, $id)
-    {
-        // Validation de l'ID
-        if (!is_numeric($id) || $id <= 0) {
-            abort(404);
-        }
-        
-        $validator = Validator::make($request->all(), [
-            'password' => 'required|string',
-        ]);
-
-        if ($validator->fails()) {
-            return back()->withErrors($validator);
-        }
-
-        $protectedPdf = ProtectedPdf::findOrFail($id);
-
-        // Vérifier que le PDF a été payé
-        if (!$protectedPdf->is_paid) {
-            return back()->withErrors(['password' => 'Ce devis n\'a pas encore été payé.']);
-        }
-
-        if (!$protectedPdf->verifyPassword($request->password)) {
-            Log::warning('Tentative de mot de passe incorrect', [
-                'protected_pdf_id' => $id,
-                'user_id' => auth()->id(),
-                'ip' => request()->ip()
-            ]);
-            
-            return back()->withErrors(['password' => 'Mot de passe incorrect.']);
-        }
-
-        // Log de téléchargement autorisé
-        Log::info('Téléchargement PDF autorisé', [
-            'protected_pdf_id' => $id,
-            'quote_number' => $protectedPdf->quote_number,
-            'user_id' => auth()->id(),
-            'ip' => request()->ip()
-        ]);
-
-        // Décoder et retourner le PDF avec headers sécurisés
-        $pdfContent = base64_decode($protectedPdf->pdf_content);
-        
-        return response($pdfContent)
-            ->header('Content-Type', 'application/pdf')
-            ->header('Content-Disposition', 'attachment; filename="' . $protectedPdf->filename . '"')
-            ->header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            ->header('Pragma', 'no-cache')
-            ->header('Expires', '0');
-    }
-
-    // ... Conservez toutes vos autres méthodes existantes (numberToWords, amountToWords, etc.)
 
     /**
      * Convertit un nombre en mots français
@@ -762,14 +463,196 @@ class QuoteController extends Controller
     }
 
     /**
+     * Affiche la vue de gestion des paiements
+     */
+    public function payments()
+    {
+        $user = Auth::user();
+        $pendingPdfs = ProtectedPdf::where('user_id', $user->id)
+            ->where('is_paid', false)
+            ->orderBy('created_at', 'desc')
+            ->get();
+            
+        return view('quotes.payment', compact('pendingPdfs'));
+    }
+
+    /**
+     * Affiche le formulaire de saisie du mot de passe (version sécurisée)
+     */
+    public function showPasswordForm($id)
+    {
+        // Validation de l'ID
+        if (!is_numeric($id) || $id <= 0) {
+            abort(404, 'Devis non trouvé');
+        }
+        
+        $protectedPdf = ProtectedPdf::findOrFail($id);
+        
+        // Log de tentative d'accès
+        Log::info('Accès formulaire mot de passe', [
+            'protected_pdf_id' => $id,
+            'user_id' => auth()->id(),
+            'client_email' => $protectedPdf->client_email,
+            'ip' => request()->ip()
+        ]);
+        
+        return view('quotes.password-form', compact('protectedPdf'));
+    }
+
+    /**
+     * Vérifie le mot de passe et télécharge le PDF (version sécurisée)
+     */
+    public function downloadWithPassword(Request $request, $id)
+    {
+        // Validation de l'ID
+        if (!is_numeric($id) || $id <= 0) {
+            abort(404);
+        }
+        
+        $validator = Validator::make($request->all(), [
+            'password' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return back()->withErrors($validator);
+        }
+
+        $protectedPdf = ProtectedPdf::findOrFail($id);
+
+        if (!$protectedPdf->verifyPassword($request->password)) {
+            Log::warning('Tentative de mot de passe incorrect', [
+                'protected_pdf_id' => $id,
+                'user_id' => auth()->id(),
+                'ip' => request()->ip()
+            ]);
+            
+            return back()->withErrors(['password' => 'Mot de passe incorrect.']);
+        }
+
+        // Log de téléchargement autorisé
+        Log::info('Téléchargement PDF autorisé', [
+            'protected_pdf_id' => $id,
+            'quote_number' => $protectedPdf->quote_number,
+            'user_id' => auth()->id(),
+            'ip' => request()->ip()
+        ]);
+
+        // Décoder et retourner le PDF avec headers sécurisés
+        $pdfContent = base64_decode($protectedPdf->pdf_content);
+        
+        return response($pdfContent)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'attachment; filename="' . $protectedPdf->filename . '"')
+            ->header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            ->header('Pragma', 'no-cache')
+            ->header('Expires', '0');
+    }
+
+    /**
+     * Génère un PDF d'instructions de paiement
+     */
+    private function generateInstructionsPdf($quoteData, $password, $protectedPdfId)
+    {
+        $instructionsData = [
+            'quote' => $quoteData['quote'],
+            'client' => $quoteData['client'],
+            'company' => $quoteData['company'],
+            'totals' => $quoteData['totals'],
+            'password' => $password,
+            'pdf_id' => $protectedPdfId,
+            'access_url' => route('quotes.password-form', $protectedPdfId),
+            'generated_at' => now(),
+        ];
+
+        return PDF::loadView('quotes.instructions-pdf', $instructionsData);
+    }
+
+    /**
+     * Génère les instructions de paiement pour le client
+     */
+    private function getPaymentInstructions($quoteData) {
+        return [
+            'amount' => $quoteData['totals']['total'],
+            'amount_words' => $quoteData['totals']['total_words'],
+            'quote_number' => $quoteData['quote']['number'],
+            'methods' => [
+                'mobile_money' => 'Mobile Money (Orange Money, Moov Money)',
+                'bank_transfer' => 'Virement bancaire',
+                'cash' => 'Espèces (sur présentation du devis)',
+            ]
+        ];
+    }
+
+    /**
+     * Méthode pour débloquer le PDF après paiement
+     */
+    public function unlockPdf(Request $request) {
+        $validator = Validator::make($request->all(), [
+            'quote_number' => 'required|string',
+            'payment_proof' => 'required|string|min:6',
+            'notification_method' => 'required|in:email,sms',
+        ], [
+            'payment_proof.min' => 'La référence de paiement doit contenir au minimum 6 caractères.',
+        ]);
+
+        if ($validator->fails()) {
+            return back()->withErrors($validator);
+        }
+
+        $protectedPdf = ProtectedPdf::where('quote_number', $request->quote_number)
+            ->where('user_id', Auth::id())
+            ->where('is_paid', false)
+            ->first();
+
+        if (!$protectedPdf) {
+            Log::warning('Tentative de déblocage sur devis inexistant', [
+                'quote_number' => $request->quote_number,
+                'user_id' => auth()->id(),
+                'ip' => request()->ip()
+            ]);
+            
+            return back()->withErrors(['quote_number' => 'Devis non trouvé ou déjà traité.']);
+        }
+
+        // Simuler la vérification du paiement
+        $paymentVerified = $this->verifyPayment($request->payment_proof, $protectedPdf->total_amount);
+
+        if ($paymentVerified) {
+            // Marquer comme payé
+            $protectedPdf->markAsPaid();
+            
+            Log::info('Paiement vérifié et devis débloqué', [
+                'protected_pdf_id' => $protectedPdf->id,
+                'quote_number' => $request->quote_number,
+                'payment_proof' => $request->payment_proof,
+                'user_id' => auth()->id()
+            ]);
+            
+            // Envoyer le mot de passe par email ou SMS
+            $this->sendPassword($protectedPdf, $request->notification_method);
+            
+            return back()->with('success', 'Paiement vérifié ! Le mot de passe a été envoyé au client.');
+        } else {
+            Log::warning('Échec vérification paiement', [
+                'quote_number' => $request->quote_number,
+                'payment_proof' => $request->payment_proof,
+                'user_id' => auth()->id(),
+                'ip' => request()->ip()
+            ]);
+            
+            return back()->withErrors(['payment_proof' => 'Paiement non vérifié. Veuillez vérifier la référence.']);
+        }
+    }
+
+    /**
      * Simule la vérification de paiement
      */
     private function verifyPayment($paymentProof, $expectedAmount) {
         // Version Light : simulation basique
         // Dans les versions supérieures : intégration avec APIs de paiement
         
-        // Pour la démo, on accepte si la référence contient au moins 6 caractères
-        return strlen($paymentProof) >= 6;
+        // Pour la démo, on accepte si la référence contient le montant
+        return strlen($paymentProof) >= 6; // Référence minimum 6 caractères
     }
 
     /**
@@ -796,11 +679,9 @@ class QuoteController extends Controller
         $message = "
         Bonjour,
         
-        Votre paiement pour le téléchargement du devis {$quoteNumber} a été confirmé.
+        Votre paiement pour le devis {$quoteNumber} a été confirmé.
         
-        Mot de passe pour télécharger le PDF : {$password}
-        
-        Accédez à votre devis via le lien qui vous a été communiqué.
+        Mot de passe pour ouvrir le PDF : {$password}
         
         Merci de votre confiance.
         
@@ -821,7 +702,7 @@ class QuoteController extends Controller
         // Version Light : log du message (pas d'envoi réel)
         // Dans les versions supérieures : intégration SMS via Twilio, etc.
         
-        $message = "CommercialiZe: Paiement confirmé pour téléchargement devis {$quoteNumber}. Mot de passe PDF: {$password}";
+        $message = "CommercialiZe: Paiement confirmé pour devis {$quoteNumber}. Mot de passe PDF: {$password}";
         
         // Log pour la version Light
         Log::info("SMS envoyé à {$phone} : " . $message);

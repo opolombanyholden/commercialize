@@ -5,163 +5,188 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
-use Carbon\Carbon;
 
 class ProtectedPdf extends Model
 {
     use HasFactory;
 
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var array<int, string>
+     */
     protected $fillable = [
+        'user_id',
+        'quote_number',
         'filename',
-        'stored_path',
-        'password_hash',
-        'metadata',
-        'expires_at',
-        'max_downloads'
-    ];
-
-    protected $casts = [
-        'metadata' => 'array',
-        'expires_at' => 'datetime',
-        'is_active' => 'boolean'
-    ];
-
-    protected $hidden = [
-        'password_hash',
-        'stored_path'
+        'password',
+        'pdf_content',
+        'quote_data',
+        'client_email',
+        'client_phone',
+        'total_amount',
+        'security_hash',
+        'is_paid',
+        'paid_at',
+        'payment_reference',
     ];
 
     /**
-     * Boot du modèle
+     * The attributes that should be cast.
+     *
+     * @var array<string, string>
+     */
+    protected $casts = [
+        'quote_data' => 'array',
+        'total_amount' => 'decimal:2',
+        'is_paid' => 'boolean',
+        'paid_at' => 'datetime',
+    ];
+
+    /**
+     * The attributes that should be hidden for serialization.
+     *
+     * @var array<int, string>
+     */
+    protected $hidden = [
+        'pdf_content',
+        'password',
+    ];
+
+    /**
+     * Relation avec l'utilisateur
+     */
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    /**
+     * Vérifie le mot de passe fourni
+     *
+     * @param string $password
+     * @return bool
+     */
+    public function verifyPassword(string $password): bool
+    {
+        // Comparaison directe (mot de passe en clair)
+        // Vous pouvez utiliser Hash::check() si vous préférez hasher les mots de passe
+        return $this->password === $password;
+    }
+
+    /**
+     * Marque le PDF comme payé
+     *
+     * @param string|null $paymentReference
+     * @return bool
+     */
+    public function markAsPaid(string $paymentReference = null): bool
+    {
+        $this->is_paid = true;
+        $this->paid_at = now();
+        
+        if ($paymentReference) {
+            $this->payment_reference = $paymentReference;
+        }
+        
+        return $this->save();
+    }
+
+    /**
+     * Scope pour les PDFs non payés
+     */
+    public function scopeUnpaid($query)
+    {
+        return $query->where('is_paid', false);
+    }
+
+    /**
+     * Scope pour les PDFs payés
+     */
+    public function scopePaid($query)
+    {
+        return $query->where('is_paid', true);
+    }
+
+    /**
+     * Scope pour un utilisateur spécifique
+     */
+    public function scopeForUser($query, $userId)
+    {
+        return $query->where('user_id', $userId);
+    }
+
+    /**
+     * Accesseur pour obtenir le statut de paiement en français
+     */
+    public function getPaymentStatusAttribute(): string
+    {
+        return $this->is_paid ? 'Payé' : 'En attente';
+    }
+
+    /**
+     * Accesseur pour obtenir la taille du fichier PDF
+     */
+    public function getPdfSizeAttribute(): string
+    {
+        if (empty($this->pdf_content)) {
+            return '0 KB';
+        }
+        
+        $bytes = strlen(base64_decode($this->pdf_content));
+        $units = ['B', 'KB', 'MB', 'GB'];
+        
+        for ($i = 0; $bytes > 1024; $i++) {
+            $bytes /= 1024;
+        }
+        
+        return round($bytes, 2) . ' ' . $units[$i];
+    }
+
+    /**
+     * Mutateur pour hasher le mot de passe si nécessaire
+     * (Optionnel - décommentez si vous voulez hasher les mots de passe)
+     */
+    /*
+    public function setPasswordAttribute(string $value): void
+    {
+        $this->attributes['password'] = Hash::make($value);
+    }
+    */
+
+    /**
+     * Méthode pour obtenir l'URL d'accès au PDF
+     */
+    public function getAccessUrlAttribute(): string
+    {
+        return route('quotes.password-form', $this->id);
+    }
+
+    /**
+     * Méthode pour vérifier si le PDF a expiré (optionnel)
+     */
+    public function isExpired(int $daysValid = 30): bool
+    {
+        return $this->created_at->addDays($daysValid)->isPast();
+    }
+
+    /**
+     * Boot method pour ajouter des événements
      */
     protected static function boot()
     {
         parent::boot();
-        
-        static::creating(function ($model) {
-            $model->token = Str::random(32);
-        });
 
-        static::deleting(function ($model) {
-            // Supprimer le fichier physique
-            if (Storage::disk('secure')->exists($model->stored_path)) {
-                Storage::disk('secure')->delete($model->stored_path);
+        // Événement avant création
+        static::creating(function ($protectedPdf) {
+            // Générer un hash de sécurité si pas fourni
+            if (empty($protectedPdf->security_hash)) {
+                $protectedPdf->security_hash = hash('sha256', 
+                    $protectedPdf->quote_number . 
+                    $protectedPdf->user_id . 
+                    now()->timestamp
+                );
             }
         });
-    }
-
-    /**
-     * Créer un PDF protégé
-     */
-    public static function createProtected(
-        string $pdfContent,
-        string $filename,
-        string $password,
-        array $metadata = [],
-        int $hoursValid = 24,
-        int $maxDownloads = 5
-    ): self {
-        // Générer un nom de fichier unique
-        $storedFilename = Str::random(40) . '.pdf';
-        $storedPath = 'protected-pdfs/' . $storedFilename;
-        
-        // Stocker le fichier de façon sécurisée
-        Storage::disk('secure')->put($storedPath, $pdfContent);
-        
-        return self::create([
-            'filename' => $filename,
-            'stored_path' => $storedPath,
-            'password_hash' => Hash::make($password),
-            'metadata' => $metadata,
-            'expires_at' => Carbon::now()->addHours($hoursValid),
-            'max_downloads' => $maxDownloads,
-        ]);
-    }
-
-    /**
-     * Vérifier le mot de passe
-     */
-    public function verifyPassword(string $password): bool
-    {
-        return Hash::check($password, $this->password_hash);
-    }
-
-    /**
-     * Vérifier si le PDF peut être téléchargé
-     */
-    public function canDownload(): bool
-    {
-        return $this->is_active && 
-               $this->expires_at->isFuture() && 
-               $this->download_count < $this->max_downloads;
-    }
-
-    /**
-     * Obtenir le contenu du PDF
-     */
-    public function getContent(): ?string
-    {
-        if (!$this->canDownload()) {
-            return null;
-        }
-
-        if (!Storage::disk('secure')->exists($this->stored_path)) {
-            return null;
-        }
-
-        // Incrémenter le compteur de téléchargements
-        $this->increment('download_count');
-
-        return Storage::disk('secure')->get($this->stored_path);
-    }
-
-    /**
-     * Scope pour les PDFs actifs
-     */
-    public function scopeActive($query)
-    {
-        return $query->where('is_active', true)
-                    ->where('expires_at', '>', Carbon::now());
-    }
-
-    /**
-     * Scope pour nettoyer les PDFs expirés
-     */
-    public function scopeExpired($query)
-    {
-        return $query->where('expires_at', '<', Carbon::now())
-                    ->orWhere('download_count', '>=', 'max_downloads');
-    }
-
-    /**
-     * Nettoyage automatique des PDFs expirés
-     */
-    public static function cleanupExpired(): int
-    {
-        $expired = self::expired()->get();
-        $count = $expired->count();
-        
-        foreach ($expired as $pdf) {
-            $pdf->delete();
-        }
-        
-        return $count;
-    }
-
-    /**
-     * Obtenir les informations publiques
-     */
-    public function getPublicInfo(): array
-    {
-        return [
-            'token' => $this->token,
-            'filename' => $this->filename,
-            'metadata' => $this->metadata,
-            'expires_at' => $this->expires_at,
-            'downloads_remaining' => max(0, $this->max_downloads - $this->download_count),
-            'can_download' => $this->canDownload(),
-        ];
     }
 }

@@ -29,6 +29,8 @@ class TaxController extends Controller
             'total' => $taxes->count(),
             'active' => $taxes->where('is_active', true)->count(),
             'inactive' => $taxes->where('is_active', false)->count(),
+            'taxes' => $taxes->where('rate', '>=', 0)->count(),
+            'discounts' => $taxes->where('rate', '<', 0)->count(),
         ];
 
         return view('taxes.index', compact('taxes', 'stats'));
@@ -49,16 +51,16 @@ class TaxController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
-            'rate' => 'required|numeric|min:-100|max:100',
+            'rate' => 'required|numeric|min:-100|max:1000', // Étendu pour supporter plus de flexibilité
             'description' => 'nullable|string|max:500',
             'is_active' => 'boolean',
         ], [
-            'name.required' => 'Le nom de la taxe est obligatoire.',
+            'name.required' => 'Le nom de la taxe/remise est obligatoire.',
             'name.max' => 'Le nom ne peut pas dépasser 255 caractères.',
-            'rate.required' => 'Le taux de la taxe est obligatoire.',
+            'rate.required' => 'Le taux est obligatoire.',
             'rate.numeric' => 'Le taux doit être un nombre.',
-            'rate.min' => 'Le taux ne peut pas être inférieur à -100%.',
-            'rate.max' => 'Le taux ne peut pas dépasser 100%.',
+            'rate.min' => 'Le taux ne peut pas être inférieur à -100% (remise maximale).',
+            'rate.max' => 'Le taux ne peut pas dépasser 1000%.',
             'description.max' => 'La description ne peut pas dépasser 500 caractères.',
         ]);
 
@@ -72,18 +74,20 @@ class TaxController extends Controller
             ->first();
 
         if ($existingTax) {
-            return back()->withErrors(['name' => 'Une taxe avec ce nom existe déjà.'])->withInput();
+            return back()->withErrors(['name' => 'Une taxe/remise avec ce nom existe déjà.'])->withInput();
         }
 
         // Créer la nouvelle taxe
-        Auth::user()->taxes()->create([
+        $tax = Auth::user()->taxes()->create([
             'name' => $request->name,
             'rate' => $request->rate,
             'description' => $request->description,
             'is_active' => $request->has('is_active'),
         ]);
 
-        return redirect()->route('taxes.index')->with('success', 'Taxe créée avec succès !');
+        $type = $tax->isDiscount ? 'Remise' : 'Taxe';
+        
+        return redirect()->route('taxes.index')->with('success', "{$type} \"{$tax->name}\" créée avec succès !");
     }
 
     /**
@@ -124,16 +128,16 @@ class TaxController extends Controller
 
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
-            'rate' => 'required|numeric|min:-100|max:100',
+            'rate' => 'required|numeric|min:-100|max:1000',
             'description' => 'nullable|string|max:500',
             'is_active' => 'boolean',
         ], [
-            'name.required' => 'Le nom de la taxe est obligatoire.',
+            'name.required' => 'Le nom de la taxe/remise est obligatoire.',
             'name.max' => 'Le nom ne peut pas dépasser 255 caractères.',
-            'rate.required' => 'Le taux de la taxe est obligatoire.',
+            'rate.required' => 'Le taux est obligatoire.',
             'rate.numeric' => 'Le taux doit être un nombre.',
-            'rate.min' => 'Le taux ne peut pas être inférieur à -100%.',
-            'rate.max' => 'Le taux ne peut pas dépasser 100%.',
+            'rate.min' => 'Le taux ne peut pas être inférieur à -100% (remise maximale).',
+            'rate.max' => 'Le taux ne peut pas dépasser 1000%.',
             'description.max' => 'La description ne peut pas dépasser 500 caractères.',
         ]);
 
@@ -148,8 +152,10 @@ class TaxController extends Controller
             ->first();
 
         if ($existingTax) {
-            return back()->withErrors(['name' => 'Une autre taxe avec ce nom existe déjà.'])->withInput();
+            return back()->withErrors(['name' => 'Une autre taxe/remise avec ce nom existe déjà.'])->withInput();
         }
+
+        $oldType = $tax->type_label;
 
         // Mettre à jour la taxe
         $tax->update([
@@ -159,7 +165,9 @@ class TaxController extends Controller
             'is_active' => $request->has('is_active'),
         ]);
 
-        return redirect()->route('taxes.index')->with('success', 'Taxe modifiée avec succès !');
+        $newType = $tax->fresh()->type_label;
+        
+        return redirect()->route('taxes.index')->with('success', "{$newType} \"{$tax->name}\" modifiée avec succès !");
     }
 
     /**
@@ -173,9 +181,10 @@ class TaxController extends Controller
         }
 
         $taxName = $tax->name;
+        $type = $tax->type_label;
         $tax->delete();
 
-        return redirect()->route('taxes.index')->with('success', "La taxe \"{$taxName}\" a été supprimée avec succès !");
+        return redirect()->route('taxes.index')->with('success', "La {$type} \"{$taxName}\" a été supprimée avec succès !");
     }
 
     /**
@@ -193,7 +202,58 @@ class TaxController extends Controller
         ]);
 
         $status = $tax->is_active ? 'activée' : 'désactivée';
+        $type = strtolower($tax->type_label);
         
-        return redirect()->route('taxes.index')->with('success', "La taxe \"{$tax->name}\" a été {$status} avec succès !");
+        return redirect()->route('taxes.index')->with('success', "La {$type} \"{$tax->name}\" a été {$status} avec succès !");
+    }
+
+// Dans app/Http/Controllers/TaxController.php - modifiez les règles de validation :
+
+    private function getValidationRules()
+    {
+        return [
+            'name' => 'required|string|max:100',
+            'type' => 'required|in:percentage,fixed',
+            'rate' => 'required|numeric|min:-100|max:1000', // Permet les taux négatifs
+            'description' => 'nullable|string|max:255',
+            'is_active' => 'boolean',
+        ];
+    }
+    
+    private function getValidationMessages()
+    {
+        return [
+            'name.required' => 'Le nom de la taxe est obligatoire.',
+            'type.required' => 'Le type de taxe est obligatoire.',
+            'type.in' => 'Le type doit être pourcentage ou montant fixe.',
+            'rate.required' => 'Le taux est obligatoire.',
+            'rate.numeric' => 'Le taux doit être un nombre.',
+            'rate.min' => 'Le taux doit être supérieur ou égal à -100.',
+            'rate.max' => 'Le taux ne peut pas dépasser 1000.',
+        ];
+    }
+
+    /**
+     * Get taxes for AJAX requests (for quote/invoice forms)
+     */
+    public function getTaxesForSelect()
+    {
+        $user = Auth::user();
+        $taxes = $user->activeTaxes()->orderBy('name')->get();
+        
+        return response()->json([
+            'taxes' => $taxes->map(function ($tax) {
+                return [
+                    'id' => $tax->id,
+                    'name' => $tax->name,
+                    'rate' => $tax->rate,
+                    'display_name' => $tax->display_name,
+                    'full_label' => $tax->full_label,
+                    'is_discount' => $tax->is_discount,
+                    'type_label' => $tax->type_label,
+                    'styled_rate' => $tax->styled_rate,
+                ];
+            })
+        ]);
     }
 }

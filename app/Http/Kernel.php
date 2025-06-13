@@ -64,4 +64,11 @@ class Kernel extends HttpKernel
         'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
         'verified' => \Illuminate\Auth\Middleware\EnsureEmailIsVerified::class,
     ];
+
+    // Pour Laravel 10 - dans app/Http/Kernel.php
+protected $middlewareAliases = [
+    // ... autres middlewares
+    'pdf.rate.limit' => \App\Http\Middleware\PDFRateLimit::class,
+];
+
 }

@@ -45,6 +45,7 @@ class Tax extends Model
 
     /**
      * Calculate tax amount for a given price (excluding tax)
+     * Supporte maintenant les taux négatifs (remises)
      */
     public function calculateTax($amountExcludingTax)
     {
@@ -84,18 +85,77 @@ class Tax extends Model
     }
 
     /**
-     * Get formatted rate (ex: 18.00%)
+     * Get formatted rate with sign (ex: +18.00% or -5.00%)
      */
     public function getFormattedRateAttribute()
     {
-        return number_format($this->rate, 2) . '%';
+        $sign = $this->rate >= 0 ? '+' : '';
+        return $sign . number_format($this->rate, 2) . '%';
     }
 
     /**
-     * Get display name with rate
+     * Get display name with rate (for forms and lists)
      */
     public function getDisplayNameAttribute()
     {
         return $this->name . ' (' . $this->formatted_rate . ')';
+    }
+
+    /**
+     * Get full label for PDF and detailed views
+     */
+    public function getFullLabelAttribute()
+    {
+        $sign = $this->rate >= 0 ? '+' : '';
+        $typeLabel = $this->isDiscount ? 'Remise' : 'Taxe';
+        
+        return $this->name . ' (' . $typeLabel . ' : ' . $sign . number_format($this->rate, 2) . '%)';
+    }
+
+    /**
+     * Determine if this is a discount (negative rate)
+     */
+    public function getIsDiscountAttribute()
+    {
+        return $this->rate < 0;
+    }
+
+    /**
+     * Get the type label in French
+     */
+    public function getTypeLabelAttribute()
+    {
+        return $this->isDiscount ? 'Remise' : 'Taxe';
+    }
+
+    /**
+     * Get rate with proper styling for display
+     */
+    public function getStyledRateAttribute()
+    {
+        $class = $this->isDiscount ? 'text-green-600' : 'text-blue-600';
+        $sign = $this->rate >= 0 ? '+' : '';
+        
+        return [
+            'value' => $sign . number_format($this->rate, 2) . '%',
+            'class' => $class,
+            'type' => $this->type_label
+        ];
+    }
+
+    /**
+     * Scope for taxes only (positive rates)
+     */
+    public function scopeTaxesOnly($query)
+    {
+        return $query->where('rate', '>=', 0);
+    }
+
+    /**
+     * Scope for discounts only (negative rates)
+     */
+    public function scopeDiscountsOnly($query)
+    {
+        return $query->where('rate', '<', 0);
     }
 }

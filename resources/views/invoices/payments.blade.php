@@ -1,6 +1,6 @@
 @extends('layouts.app')
 
-@section('title', 'Gestion des Paiements - CommercialiZe')
+@section('title', 'Gestion des Paiements - Factures - CommercialiZe')
 
 @section('content')
 <div class="min-vh-100 py-5">
@@ -10,13 +10,13 @@
             <div class="col-md-10 col-lg-8">
                 <div class="text-center mb-4">
                     <div class="logo-icon mx-auto mb-3" style="width: 60px; height: 60px; font-size: 1.5rem;">
-                        <i class="fas fa-credit-card" style="color: var(--primary-color);"></i>
+                        <i class="fas fa-file-invoice-dollar" style="color: var(--primary-color);"></i>
                     </div>
                     <h1 class="fw-bold mb-2">
                         <span style="color: var(--primary-color);">Gestion des</span> 
-                        <span style="color: var(--secondary-color);">Paiements</span>
+                        <span style="color: var(--secondary-color);">Paiements Factures</span>
                     </h1>
-                    <p class="text-muted">Procédez au paiement pour télécharger vos devis PDF sécurisés</p>
+                    <p class="text-muted">Procédez au paiement pour télécharger vos factures PDF sécurisées</p>
                 </div>
             </div>
         </div>
@@ -31,10 +31,16 @@
                         
                         @if(session('download_instructions'))
                             <div class="mt-3">
-                                <a href="{{ route('quotes.download-instructions') }}" 
+                                <a href="{{ route('invoices.download-instructions', $protectedInvoice->id) }}" 
                                    class="btn btn-success btn-sm">
                                     <i class="fas fa-download me-2"></i>Télécharger le PDF d'instructions
                                 </a>
+                            </div>
+                        @endif
+                        
+                        @if(session('password_hint'))
+                            <div class="mt-3 p-2 bg-info text-white rounded">
+                                <small><strong>DEBUG - Mot de passe :</strong> {{ session('password_hint') }}</small>
                             </div>
                         @endif
                         
@@ -112,51 +118,59 @@
             </div>
         @endif
 
-        <!-- Devis récemment généré -->
-        @if(isset($lastGeneratedQuote) && $lastGeneratedQuote)
+        <!-- Facture récemment générée -->
+        @if(isset($protectedInvoice) && $protectedInvoice)
             <div class="row justify-content-center mb-5">
                 <div class="col-md-10 col-lg-8">
                     <div class="card shadow-lg border-0">
                         <div class="card-body p-5">
-                            <!-- En-tête du devis -->
+                            <!-- En-tête de la facture -->
                             <div class="text-center mb-4">
                                 <div class="logo-icon mx-auto mb-3" style="width: 50px; height: 50px; font-size: 1.2rem;">
-                                    <i class="fas fa-file-invoice" style="color: var(--success-color);"></i>
+                                    <i class="fas fa-file-invoice-dollar" style="color: var(--success-color);"></i>
                                 </div>
                                 <h3 class="fw-bold mb-2">
-                                    <span style="color: var(--success-color);">Devis généré</span> 
+                                    <span style="color: var(--success-color);">Facture générée</span> 
                                     <span style="color: var(--primary-color);">avec succès</span>
                                 </h3>
-                                <p class="text-muted mb-0">{{ $lastGeneratedQuote->quote_number }}</p>
+                                <p class="text-muted mb-0">{{ $protectedInvoice->formatted_invoice_number }}</p>
                             </div>
 
-                            <!-- Informations du devis -->
+                            <!-- Informations de la facture -->
                             <div class="alert alert-success">
                                 <i class="fas fa-check-circle me-2"></i>
                                 <strong>Document prêt</strong><br>
-                                Votre devis a été généré et est prêt au téléchargement après paiement.
+                                Votre facture a été générée et est prête au téléchargement après paiement.
                             </div>
 
                             <div class="mb-4">
                                 <div class="row text-center">
                                     <div class="col-6 col-md-3">
                                         <small class="text-muted">Client</small>
-                                        <div class="fw-bold">{{ $lastGeneratedQuote->quote_data['client']['name'] ?? 'N/A' }}</div>
+                                        <div class="fw-bold">{{ $protectedInvoice->invoice_data['client']['name'] }}</div>
                                     </div>
                                     <div class="col-6 col-md-3">
                                         <small class="text-muted">Montant total</small>
-                                        <div class="fw-bold text-success">{{ number_format($lastGeneratedQuote->total_amount, 0, ',', ' ') }} FCFA</div>
+                                        <div class="fw-bold text-success">{{ $protectedInvoice->formatted_total }}</div>
                                     </div>
                                     <div class="col-6 col-md-3">
-                                        <small class="text-muted">Date</small>
-                                        <div class="fw-bold">{{ $lastGeneratedQuote->created_at->format('d/m/Y') }}</div>
+                                        <small class="text-muted">Date d'échéance</small>
+                                        <div class="fw-bold">{{ $protectedInvoice->due_date->format('d/m/Y') }}</div>
                                     </div>
                                     <div class="col-6 col-md-3">
                                         <small class="text-muted">Statut</small>
-                                        <div><span class="badge bg-warning">En attente</span></div>
+                                        <div><span class="badge {{ $protectedInvoice->status_class }}">{{ $protectedInvoice->status_label }}</span></div>
                                     </div>
                                 </div>
                             </div>
+
+                            <!-- Alerte si facture en retard -->
+                            @if($protectedInvoice->isOverdue())
+                                <div class="alert alert-warning">
+                                    <i class="fas fa-exclamation-triangle me-2"></i>
+                                    <strong>Attention :</strong> Cette facture a dépassé sa date d'échéance de {{ abs($protectedInvoice->days_until_due) }} jour(s).
+                                </div>
+                            @endif
 
                             <hr class="my-4">
 
@@ -165,9 +179,9 @@
                                 <i class="fas fa-credit-card me-2 text-primary"></i>Procéder au paiement
                             </h5>
                             
-                            <form action="{{ route('quotes.process-payment') }}" method="POST">
+                            <form action="{{ route('invoices.process-payment') }}" method="POST">
                                 @csrf
-                                <input type="hidden" name="quote_id" value="{{ $lastGeneratedQuote->id }}">
+                                <input type="hidden" name="invoice_id" value="{{ $protectedInvoice->id }}">
 
                                 <div class="row g-3">
                                     <!-- Méthode de paiement -->
@@ -178,13 +192,16 @@
                                         <select name="payment_method" class="form-select @error('payment_method') is-invalid @enderror" required>
                                             <option value="">Sélectionnez une méthode</option>
                                             <option value="mobile_money" {{ old('payment_method') == 'mobile_money' ? 'selected' : '' }}>
-                                                <i class="fas fa-mobile-alt"></i> Mobile Money (Orange/Moov)
+                                                <i class="fas fa-mobile-alt"></i> Mobile Money (Orange/Moov/Airtel)
                                             </option>
                                             <option value="bank_transfer" {{ old('payment_method') == 'bank_transfer' ? 'selected' : '' }}>
                                                 <i class="fas fa-university"></i> Virement bancaire
                                             </option>
-                                            <option value="cash" {{ old('payment_method') == 'cash' ? 'selected' : '' }}>
-                                                <i class="fas fa-money-bill"></i> Espèces
+                                            <option value="paypal" {{ old('payment_method') == 'paypal' ? 'selected' : '' }}>
+                                                <i class="fab fa-paypal"></i> PayPal
+                                            </option>
+                                            <option value="stripe" {{ old('payment_method') == 'stripe' ? 'selected' : '' }}>
+                                                <i class="fab fa-stripe"></i> Carte bancaire (Stripe)
                                             </option>
                                         </select>
                                         @error('payment_method')
@@ -237,7 +254,7 @@
                                         <input type="text" 
                                                id="client_contact" 
                                                name="client_contact" 
-                                               value="{{ old('client_contact', $lastGeneratedQuote->client_email ?? $lastGeneratedQuote->client_phone) }}"
+                                               value="{{ old('client_contact', $protectedInvoice->client_email ?? $protectedInvoice->client_phone) }}"
                                                class="form-control @error('client_contact') is-invalid @enderror"
                                                placeholder="email@exemple.com ou +241 XX XX XX XX"
                                                required>
@@ -260,8 +277,8 @@
 
                                 <!-- Boutons d'action -->
                                 <div class="d-grid gap-2 d-md-flex justify-content-md-between">
-                                    <a href="{{ route('quotes.create') }}" class="btn btn-outline-secondary">
-                                        <i class="fas fa-plus me-2"></i>Nouveau devis
+                                    <a href="{{ route('invoices.create') }}" class="btn btn-outline-secondary">
+                                        <i class="fas fa-plus me-2"></i>Nouvelle facture
                                     </a>
                                     <button type="submit" class="btn btn-primary btn-lg px-4">
                                         <i class="fas fa-credit-card me-2"></i>Confirmer le paiement
@@ -273,16 +290,16 @@
                 </div>
             </div>
         @endif
-
-        <!-- Liste des devis en attente -->
-        @if(isset($pendingPdfs) && $pendingPdfs->count() > 0)
+        
+        <!-- Liste des factures en attente -->
+        @if(isset($pendingInvoices) && $pendingInvoices->count() > 0)
             <div class="row justify-content-center">
                 <div class="col-md-10 col-lg-8">
                     <div class="card shadow border-0">
                         <div class="card-header bg-light">
                             <h5 class="card-title mb-0">
                                 <i class="fas fa-hourglass-half me-2 text-warning"></i>
-                                Devis en attente de paiement ({{ $pendingPdfs->count() }})
+                                Factures en attente de paiement ({{ $pendingInvoices->count() }})
                             </h5>
                         </div>
                         <div class="card-body p-0">
@@ -290,36 +307,38 @@
                                 <table class="table table-hover mb-0">
                                     <thead class="table-light">
                                         <tr>
-                                            <th>Devis</th>
+                                            <th>Facture</th>
                                             <th>Client</th>
                                             <th>Montant</th>
-                                            <th>Date</th>
+                                            <th>Échéance</th>
                                             <th>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        @foreach($pendingPdfs as $pdf)
+                                        @foreach($pendingInvoices as $pendingInvoice)
                                             <tr>
                                                 <td>
                                                     <div>
-                                                        <div class="fw-semibold">{{ $pdf->quote_number }}</div>
-                                                        <small class="text-muted">{{ $pdf->filename }}</small>
+                                                        <div class="fw-semibold">{{ $pendingInvoice->formatted_invoice_number }}</div>
+                                                        <small class="text-muted">{{ $pendingInvoice->created_at->format('d/m/Y') }}</small>
                                                     </div>
                                                 </td>
                                                 <td>
-                                                    <div>{{ $pdf->quote_data['client']['name'] ?? 'N/A' }}</div>
-                                                    <small class="text-muted">{{ $pdf->client_email ?? $pdf->client_phone ?? 'Contact non défini' }}</small>
+                                                    <div>{{ $pendingInvoice->invoice_data['client']['name'] }}</div>
+                                                    <small class="text-muted">{{ $pendingInvoice->client_email ?? $pendingInvoice->client_phone ?? 'Contact non défini' }}</small>
                                                 </td>
                                                 <td>
-                                                    <div class="fw-semibold">{{ number_format($pdf->total_amount, 0, ',', ' ') }} FCFA</div>
+                                                    <div class="fw-semibold">{{ $pendingInvoice->formatted_total }}</div>
                                                     <small class="text-muted">Téléchargement : {{ number_format($downloadPrice ?? 500, 0, ',', ' ') }} FCFA</small>
                                                 </td>
                                                 <td>
-                                                    <div>{{ $pdf->created_at->format('d/m/Y') }}</div>
-                                                    <small class="text-muted">{{ $pdf->created_at->format('H:i') }}</small>
+                                                    <div>{{ $pendingInvoice->due_date->format('d/m/Y') }}</div>
+                                                    <small class="text-muted {{ $pendingInvoice->isOverdue() ? 'text-danger' : 'text-success' }}">
+                                                        {{ $pendingInvoice->isOverdue() ? 'En retard' : 'Dans les délais' }}
+                                                    </small>
                                                 </td>
                                                 <td>
-                                                    <button onclick="openPaymentModal({{ $pdf->id }}, '{{ $pdf->quote_number }}')" 
+                                                    <button onclick="openPaymentModal({{ $pendingInvoice->id }}, '{{ $pendingInvoice->formatted_invoice_number }}')" 
                                                             class="btn btn-primary btn-sm">
                                                         <i class="fas fa-credit-card me-1"></i>Payer
                                                     </button>
@@ -342,11 +361,11 @@
                             <div class="logo-icon mx-auto mb-3" style="width: 60px; height: 60px; font-size: 1.5rem;">
                                 <i class="fas fa-check-circle" style="color: var(--success-color);"></i>
                             </div>
-                            <h4 class="fw-bold mb-3">Aucun devis en attente</h4>
-                            <p class="text-muted mb-4">Vous n'avez aucun devis en attente de paiement.</p>
+                            <h4 class="fw-bold mb-3">Aucune facture en attente</h4>
+                            <p class="text-muted mb-4">Vous n'avez aucune facture en attente de paiement.</p>
                             <div class="d-flex justify-content-center gap-3">
-                                <a href="{{ route('quotes.create') }}" class="btn btn-primary">
-                                    <i class="fas fa-plus me-2"></i>Créer un nouveau devis
+                                <a href="{{ route('invoices.create') }}" class="btn btn-primary">
+                                    <i class="fas fa-plus me-2"></i>Créer une nouvelle facture
                                 </a>
                                 <a href="{{ route('pricing.billing') }}" class="btn btn-outline-success">
                                     <i class="fas fa-wallet me-2"></i>Recharger mon compte
@@ -360,20 +379,20 @@
     </div>
 </div>
 
-<!-- Modal de paiement pour les anciens devis -->
+<!-- Modal de paiement pour les anciennes factures -->
 <div class="modal fade" id="paymentModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">
-                    <i class="fas fa-credit-card me-2"></i>Paiement devis <span id="modalQuoteNumber"></span>
+                    <i class="fas fa-credit-card me-2"></i>Paiement facture <span id="modalInvoiceNumber"></span>
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <form action="{{ route('quotes.process-payment') }}" method="POST" id="modalPaymentForm">
+                <form action="{{ route('invoices.process-payment') }}" method="POST" id="modalPaymentForm">
                     @csrf
-                    <input type="hidden" name="quote_id" id="modalQuoteId">
+                    <input type="hidden" name="invoice_id" id="modalInvoiceId">
 
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Méthode de paiement *</label>
@@ -381,7 +400,8 @@
                             <option value="">Sélectionnez...</option>
                             <option value="mobile_money">Mobile Money</option>
                             <option value="bank_transfer">Virement bancaire</option>
-                            <option value="cash">Espèces</option>
+                            <option value="paypal">PayPal</option>
+                            <option value="stripe">Carte bancaire</option>
                         </select>
                     </div>
 
@@ -423,9 +443,9 @@
 </div>
 
 <script>
-function openPaymentModal(quoteId, quoteNumber) {
-    document.getElementById('modalQuoteId').value = quoteId;
-    document.getElementById('modalQuoteNumber').textContent = quoteNumber;
+function openPaymentModal(invoiceId, invoiceNumber) {
+    document.getElementById('modalInvoiceId').value = invoiceId;
+    document.getElementById('modalInvoiceNumber').textContent = invoiceNumber;
     
     // Utiliser Bootstrap modal
     const modal = new bootstrap.Modal(document.getElementById('paymentModal'));
